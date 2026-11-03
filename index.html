@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Web Worker 및 보안 정책(CSP) 오류 방지 메타 태그 -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https:; worker-src 'self' blob: data:;">
+    <title>AI 가위바위보 손 모양 인식기</title>
+    <style>
+        body {
+            background-color: #fff5f5; /* 밝은 파스텔톤 배경 */
+            font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif;
+            text-align: center;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 {
+            color: #555;
+            margin-bottom: 10px;
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            max-width: 500px;
+            margin-top: 20px;
+            border-radius: 20px;
+            overflow: hidden;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+            background-color: #ffe4e1;
+        }
+        video, img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        /* 오른쪽 상단 결과 오버레이 */
+        .result-overlay {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 10px 20px;
+            border-radius: 15px;
+            font-size: 1.4rem;
+            font-weight: bold;
+            color: #333;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+            z-index: 10;
+        }
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+            max-width: 600px;
+        }
+        button, label.upload-btn {
+            background-color: #b0e0e6; /* 파스텔 블루 */
+            border: none;
+            padding: 15px 20px;
+            font-size: 1.1rem;
+            font-weight: bold;
+            border-radius: 12px;
+            cursor: pointer;
+            color: #444;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: transform 0.2s, background-color 0.2s;
+            display: inline-block;
+        }
+        button:disabled {
+            background-color: #e0e0e0;
+            color: #aaa;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+        button:not(:disabled):active, label.upload-btn:active {
+            transform: scale(0.95);
+        }
+        button:not(:disabled):hover, label.upload-btn:hover {
+            background-color: #add8e6;
+        }
+        input[type="file"] { display: none; }
+        #statusMessage {
+            margin-top: 15px;
+            font-size: 1.1rem;
+            color: #ff6b6b;
+            font-weight: bold;
+            word-break: keep-all;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>✌️✊🖐 AI 가위바위보 인식기</h1>
+
+    <div class="video-container">
+        <video id="webcam" autoplay playsinline></video>
+        <img id="fallbackImage" style="display: none;" alt="업로드된 이미지" />
+        <div class="result-overlay" id="resultOverlay">대기 중...</div>
+    </div>
+
+    <div id="statusMessage">카메라를 켜거나 사진을 업로드해 주세요.</div>
+
+    <div class="controls">
+        <button id="btnStartCam">카메라 켜기</button>
+        <button id="btnStartRec" disabled>인식 시작</button>
+        <button id="btnStopRec" disabled>인식 중지</button>
+        <button id="btnStopCam" disabled>카메라 끄기</button>
+        
+        <label class="upload-btn">
+            사진 업로드
+            <input type="file" id="fileUpload" accept="image/*">
+        </label>
+    </div>
+
+    <!-- 캡처 및 이미지 변환용 숨김 캔버스 -->
+    <canvas id="canvas" style="display: none;"></canvas>
+
+    <script>
+        const video = document.getElementById('webcam');
+        const fallbackImage = document.getElementById('fallbackImage');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const resultOverlay = document.getElementById('resultOverlay');
+        const statusMessage = document.getElementById('statusMessage');
+        
+        const btnStartCam = document.getElementById('btnStartCam');
+        const btnStartRec = document.getElementById('btnStartRec');
+        const btnStopRec = document.getElementById('btnStopRec');
+        const btnStopCam = document.getElementById('btnStopCam');
+        const fileUpload = document.getElementById('fileUpload');
+
+        let stream = null;
+        let recognizing = false;
+        let isProcessing = false; // 이전 요청이 완료될 때까지 중복 호출 금지 플래그
+        let useImageUpload = false;
+
+        const classMap = {
+            'rock': '✊ 바위',
+            'paper': '🖐 보',
+            'scissors': '✌ 가위'
+        };
+
+        // 1. 카메라 시작
+        btnStartCam.addEventListener('click', async () => {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' } 
+                });
+                video.srcObject = stream;
+                video.style.display = 'block';
+                fallbackImage.style.display = 'none';
+                useImageUpload = false;
+
+                btnStartCam.disabled = true;
+                btnStartRec.disabled = false;
+                btnStopCam.disabled = false;
+                statusMessage.innerText = "카메라가 켜졌습니다. '인식 시작'을 눌러주세요.";
+            } catch (err) {
+                statusMessage.innerText = "카메라 접근 권한을 허용해 주시거나 다른 브라우저에서 시도해 주세요.";
+                console.error(err);
+            }
+        });
+
+        // 2. 카메라 종료
+        btnStopCam.addEventListener('click', () => {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                video.srcObject = null;
+            }
+            stopRecognition();
+            btnStartCam.disabled = false;
+            btnStartRec.disabled = true;
+            btnStopCam.disabled = true;
+            statusMessage.innerText = "카메라가 종료되었습니다.";
+        });
+
+        // 3. 사진 업로드 (카메라 대안)
+        fileUpload.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                fallbackImage.src = event.target.result;
+                fallbackImage.style.display = 'block';
+                video.style.display = 'none';
+                useImageUpload = true;
+
+                btnStartRec.disabled = false;
+                statusMessage.innerText = "사진이 업로드되었습니다. '인식 시작'을 눌러주세요.";
+            };
+            reader.readAsDataURL(file);
+        });
+
+        // 4. 인식 시작
+        btnStartRec.addEventListener('click', () => {
+            recognizing = true;
+            btnStartRec.disabled = true;
+            btnStopRec.disabled = false;
+            statusMessage.innerText = "인식 중입니다...";
+            recognitionLoop();
+        });
+
+        // 5. 인식 중지
+        btnStopRec.addEventListener('click', () => {
+            stopRecognition();
+        });
+
+        function stopRecognition() {
+            recognizing = false;
+            btnStartRec.disabled = false;
+            btnStopRec.disabled = true;
+            statusMessage.innerText = "인식이 중지되었습니다.";
+        }
+
+        // 6. 예측 루프 (약 1초 간격, 중복 호출 방지)
+        async function recognitionLoop() {
+            if (!recognizing) return;
+            if (isProcessing) {
+                setTimeout(recognitionLoop, 500);
+                return;
+            }
+
+            isProcessing = true;
+
+            try {
+                // Vercel 4MB 전송 제한 및 네트워크 지연 방지를 위해 320x240 해상도로 강제 축소
+                canvas.width = 320;
+                canvas.height = 240;
+
+                if (useImageUpload) {
+                    ctx.drawImage(fallbackImage, 0, 0, 320, 240);
+                } else {
+                    if (video.videoWidth === 0) throw new Error("비디오 준비되지 않음");
+                    ctx.drawImage(video, 0, 0, 320, 240);
+                }
+
+                // JPEG 품질 0.5로 설정하여 최적의 압축 용량 생성
+                const base64Image = canvas.toDataURL('image/jpeg', 0.5);
+
+                const response = await fetch('/api/predict', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image: base64Image })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    resultOverlay.innerText = "오류 발생";
+                    statusMessage.innerText = data.details || data.message || "서버 통신 오류가 발생했습니다.";
+                } else {
+                    displayResult(data);
+                }
+
+            } catch (err) {
+                console.error("클라이언트 요청 에러:", err);
+                resultOverlay.innerText = "오류 발생";
+                statusMessage.innerText = "네트워크 연결 또는 분석 중 오류가 발생했습니다.";
+            } finally {
+                isProcessing = false;
+                if (recognizing) setTimeout(recognitionLoop, 1000);
+            }
+        }
+
+        // 7. 결과 출력 함수 (Roboflow Workflow 다양한 응답 구조 자동 파싱)
+        function displayResult(data) {
+            console.log("Roboflow 응답:", data);
+
+            let topClass = "알 수 없음";
+            let confidence = 0;
+
+            let target = data;
+            if (Array.isArray(data) && data.length > 0) target = data[0];
+            if (target.outputs) {
+                if (Array.isArray(target.outputs)) target = target.outputs[0];
+                else target = target.outputs;
+            }
+
+            // Workflow 및 다양한 분류 모델 응답 형태 탐색
+            const predictions = target.predictions || target.predictions_1 || (target.result && target.result.predictions);
+
+            if (predictions) {
+                if (Array.isArray(predictions) && predictions.length > 0) {
+                    topClass = predictions[0].class || predictions[0].top || topClass;
+                    confidence = predictions[0].confidence || 0;
+                } else if (typeof predictions === 'object') {
+                    topClass = predictions.top || predictions.class || topClass;
+                    confidence = predictions.confidence || 0;
+                }
+            } else if (target.top) {
+                topClass = target.top;
+                confidence = target.confidence || 0;
+            }
+
+            const displayName = classMap[topClass.toLowerCase()] || topClass;
+            const percent = (confidence * 100).toFixed(1);
+
+            resultOverlay.innerText = `${displayName} (${percent}%)`;
+        }
+    </script>
+</body>
+</html>
